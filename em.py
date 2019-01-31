@@ -1,179 +1,167 @@
-import math
 import numpy as np
-import random
+import math
 
-def sdp_mat(dim, sd):
-    M = np.array(np.random.rand(dim, dim))
-    M = 0.5 * (M + M.T)
-    M = M + sd * np.eye(dim)
-    return M
+log_tau = math.log(math.pi * 2)
 
-"""
-Generate a symmetric definite positive matrice
-"""
-def get_sdp_mat(sd_diff, nb_gauss, dim):
-    SDClass = np.random.rand(1, nb_gauss) + sd_diff
-
-    return [sdp_mat(dim, i) for i in SDClass[0]]
-
-def gen_gmm(theta, nb_pts, nb_gauss, mu, cov):
-    r = np.random.multinomial(nb_pts, theta)
-
-    data = []
+def data_generate(means, covas, nb_gauss, size):
+    data = np.empty([nb_gauss, size, len(means[0])])  # len(means[0]) = dim
     for i in range (nb_gauss):
-        gmm = np.random.multivariate_normal(mu[i], cov[i], r[i])
-        for j in range (r[i]):
-            data.append(gmm[j])
-    """
-    data = np.random.multivariate_normal(mu[0], cov[0], nb_pts) #fixme  [nb_pts, dim]
-    """
+        data[i] = np.random.multivariate_normal(means[i], covas[i], size)
+
+    data.resize(nb_gauss * size * len(means[0]))
+    data.resize(nb_gauss * size, len(means[0]), 1)
     return data
 
-def update_mu(mu, s_weight, data, weights_array):
-    for d in range (len(data[0])):
-        mu[d] = 0
+def cova_generate(nb_gauss, dim, range_val):
+    covas = np.empty([nb_gauss, dim, dim])
+    for i in range (nb_gauss):
+        var = range_val * (i + 1) 
+        mat = np.random.rand(dim, dim) * range_val
+        covas[i] = 0.5 * (mat + mat.T) + np.eye(dim) * var
+    return covas
 
+def mean_generate(data, nb_gauss):
+    dim = len(data[0])
+    means = np.zeros([nb_gauss, dim, 1])
+    card = np.zeros([nb_gauss])
+
+    rand_idx = np.random.randint(0, nb_gauss, len(data))
     for i in range (len(data)):
-        for d in range (dim):
-            mu[d] += data[i][d] * weights_array[i]
+        idx = rand_idx[i]
+        means[idx] += data[i]
+        card[idx] += 1
 
-    mu /= s_weight
+    for i in range (nb_gauss):
+        means[i] /= card[i]
 
-def var_flor(s, f):
-    l = np.linalg.cholesky(s)
+    return means
 
-    l_inv = np.linalg.inv(l)
-    t = l_inv * s * l_inv.T
+def p_log(x, mean, cova):
+    det = np.linalg.det(cova)
+    fraction = len(mean) * log_tau + math.log(det)
 
-    u, d = np.linalg.eig(t)
+    center = x - mean
+    center.resize(dim, 1)
 
-    for i in range (len(d)):
-        d[i][i] = max(1, d[i][i])
+    return -0.5 * (fraction + (center.T).dot(np.linalg.inv(cova)).dot(center))
 
-    t_ = u * d * u.T
+def update_cova(data, mean, p_cache, gauss):
+    dim = len(data[0])
+    num = np.zeros([dim, dim])
 
-    return l * t_ * l.T
+    for k in range (len(data)):
+        center = data[k] - mean
+        num += p_cache[k][gauss] * center.dot(center.T)
 
-def update_cov(s_weight, data_array, mu_array, weights_array):
-    cov = np.zeros([dim, dim])
+    return num / s
 
-    for i in range (len(data_array)):
-        mat = np.asmatrix(data_array[i]) - np.asmatrix(mu_array)
-        cov += weights_array[i] * (mat.T @ mat)
+def expectation(data, p_cache, means, covas, alpha):
+    maxi = -math.inf
 
-    return cov / s_weight
+    for i in range(len(data)): # compute llj
+        tab = p_cache[i]
 
-def log_multivar(point, dim, mu, cov):
-    q =  -(dim / 2) * np.log (2 * math.pi) - 0.5 * np.log(np.linalg.det(cov))
-    e = -0.5 * (point - mu).T @ np.linalg.inv(cov) @ (point - mu)
-    return q + e
+        for j in range(nb_gauss):
+            tab[j] = p_log(data[i], means[j], covas[j])
+            tab[j] += math.log(alpha[j])
+            if maxi < tab[j]:
+                maxi = tab[j]
 
-def compute_weight(weights, nb_gauss, dim, alpha, data, mu, cov):
     llk = 0
-    for i in range (len(data)):
-        maxi = -math.inf
+    for i in range (len(data)): #normalize
+        tab = p_cache[i]
         for j in range (nb_gauss):
-            weights[j][i] = log_multivar(data[i], dim, mu[j], cov[j])
-            weights[j][i] += np.log(alpha[j])
+            tab[j] = math.exp(tab[j] - maxi)
+            llk += tab[j]
 
-            if weights[j][i] > maxi:
-                maxi = weights[j][i]
-            llk += weights[j][i]
+    for j in range(len(data)):
+        tab = p_cache[j]
+        tot = np.sum(tab) + np.finfo(float).eps
 
-        tot = 0
-        for j in range (nb_gauss):
-            val = np.exp(weights[j][i] - maxi)
-            weights[j][i] = val
-            tot += val
-
-        for j in range (nb_gauss):
-            weights[j][i] /= tot
+        for k in range(nb_gauss):
+            tab[k] /= tot
 
     return llk
 
-def compare_mu(a, b):
-    dif = np.empty([len(a), len(a[0])])
+np.random.seed(0)
 
-    for i in range (len(a)):
-        for j in range (len(a[0])):
-            dif[i][j] = np.abs(a[i][j] - b[i][j])
+nb_gauss = 3
+size = 10000
+dim = 4
+range_val = 5
+range_init = 10
 
-    return dif
+means_init = np.random.rand(nb_gauss, dim)
+for i in range (nb_gauss):
+    means_init[i] *= range_init * (i + 1)
+covas_init = cova_generate(nb_gauss, dim, range_init)
 
-def compare_cov(a, b):
-    dif = np.empty([len(a), len(a[0]), len(a[0][0])])
+data = data_generate(means_init, covas_init, nb_gauss, size)
 
-    for i in range (len(a)):
-        for j in range (len(a[0])):
-            for k in range (len(a[0][0])):
-                dif[i][j][k] = np.abs(a[i][j][k] - b[i][j][k])
+"""
+print ("covariance")
+print (covas_init)
+print ("means")
+print (means_init)
+"""
 
-    return dif
+means = mean_generate(data, nb_gauss)
+covas = cova_generate(nb_gauss, dim, range_val)
+alpha = np.repeat(1.0 / nb_gauss, nb_gauss)
 
-def debug_print(target_mu, target_cov, mu, cov):
-    print ("### Target parameters")
-    print ("mu:")
-    print (target_mu)
+p_cache = np.empty([len(data), nb_gauss])
+prev = -1
+itera = 0
+max_iter = 10
 
-    print ("cov:")
-    print (target_cov)
+for itera in range (1, max_iter + 1):
+    llk = expectation(data, p_cache, means, covas, alpha)
 
-    print ("### Generate parameters")
-    print ("Generate mu:")
-    print (mu)
-    print ("Generate cov:")
-    print (cov)
+    if abs(llk - prev) < 0.001:
+        break
 
+    print('iter:', itera, 'llk =', llk)
+    prev = llk
 
-if __name__ == '__main__':
-    nb_pts = 15000
-    nb_gauss = 3
-    dim = 5
+    for i in range (nb_gauss): #Maximization
+        s = 0
+        for j in range (len(data)):
+            s += p_cache[j][i]
 
-    distanceBTWclasses = 30
+        alpha[i] = s / len(data)
 
-    alpha = np.repeat(1.0 / nb_gauss, nb_gauss)
-    target_mu = [(np.random.random(dim) * distanceBTWclasses * i) for i in range(1, nb_gauss + 1)]
-    target_cov = get_sdp_mat(4, nb_gauss, dim)
+        num = np.zeros([dim, 1]) # Update mean
+        for j in range (len(data)):
+            num += data[j] * p_cache[j][i]
+        means[i] = num / s
 
-    data = gen_gmm(alpha, nb_pts, nb_gauss, target_mu, target_cov)
+        covas[i] = update_cova(data, means[i], p_cache, i)
 
-    cov = get_sdp_mat(4, nb_gauss, dim)
-    mu = [(np.random.random(dim) * distanceBTWclasses * i) for i in range(1, nb_gauss + 1)]
+"""
+means.resize(nb_gauss, dim)
+print ("covariance")
+print (covas)
+print ("means")
+print (means)
+"""
 
-    #debug_print(target_mu, target_cov, mu, cov)
-    weights = np.empty([nb_gauss, nb_pts])
+score = 0
+histo = np.zeros([nb_gauss], dtype=int)
+histo_idx = [-1] * nb_gauss
 
-    prev = -math.inf
-    llk = -9999999 # FIXME
-    i = 0
+for i in range(len(data)):
+    if (i + 1) % size == 0:
+        b_idx = np.argmax(histo)
+        if histo_idx[b_idx] != -1:
+            print ("Fail training EM")
+        else:
+            score += histo[b_idx]
+        print (histo)
+        histo = np.zeros([nb_gauss], dtype=int)
+        histo_idx[b_idx] = 0
 
-#   print (compare_mu(target_mu, mu))
-    while i < 10 or llk - prev > 0.01:
-        if i > 30:
-            break
-        """
-        if False and i % 10 == 0:
-            plot_data(data)
-        """
-        i += 1
-        prev = llk
-        llk = compute_weight(weights, nb_gauss, dim, alpha, data, mu, cov)
-        for j in range (nb_gauss):
-            s_weight = np.sum(weights[j])
+    b_idx = np.argmax(p_cache[i])
+    histo[b_idx] += 1
 
-            alpha[j] = s_weight / nb_pts
-            update_mu(mu[j], s_weight, data, weights[j])
-            cov[j] = update_cov(s_weight, data, mu[j], weights[j])
-
-    print("###After EM:")
-
-    print ("diff mu")
-    print (compare_mu(target_mu, mu))
-
-    print ("diff cov")
-    print (compare_cov(target_cov, cov))
-
-    print ("stop after " + str(i) + " iterations")
-    print (prev)
-    print (llk)
+print ("end with :", itera, "iterations")
+print ("Score:", score, "/", len(data))
